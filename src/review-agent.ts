@@ -2,6 +2,25 @@ import { Octokit } from "@octokit/rest";
 import { WebhookEventMap } from "@octokit/webhooks-definitions/schema";
 import { ChatCompletionMessageParam } from "groq-sdk/resources/chat/completions";
 import * as xml2js from "xml2js";
+import { INLINE_FN, getInlineFixPrompt } from "./prompts/inline-prompt";
+import { chatFns } from "./llms/chat";
+import { PRSuggestionImpl } from "./data/PRSuggestionImpl";
+
+interface PRLogEvent {
+	id: number;
+	fullName: string;
+	url: string;
+}
+
+export const logPRInfo = (pullRequest: PullRequestEvent) => {
+	const logEvent: PRLogEvent = {
+		id: pullRequest.repository.id,
+		fullName: pullRequest.repository.full_name,
+		url: pullRequest.repository.html_url,
+	};
+	axiom.ingest("review-agent", [logEvent]);
+	return logEvent;
+};
 import type {
   BranchDetails,
   BuilderResponse,
@@ -27,6 +46,28 @@ import {
 } from "./prompts/inline-prompt";
 import { getGitFile } from "./reviews";
 
+export const reviewDiff = async (
+	traceTag: string,
+	convo: ChatMessage[],
+	model: LLModel = "llama-3.1-8b-instant" as LLModel
+) => {
+	const openai = new OpenAI({
+		baseURL: "https://api.groq.com/openai/v1",
+		apiKey: process.env.GROQ_API_KEY,
+	});
+	const requestParams = {
+		messages: convo,
+		model: model,
+		temperature: 0,
+	};
+	try {
+		//@ts-ignore
+		const chatCompletion = await openai.chat.completions.create(requestParams);
+		return chatCompletion.choices[0].message.content;
+	} catch (exc) {
+		throw new Error("Error getting LLM response");
+	}
+};
 export const reviewDiff = async (messages: ChatCompletionMessageParam[]) => {
   const message = await generateChatCompletion({
     messages,
@@ -34,6 +75,18 @@ export const reviewDiff = async (messages: ChatCompletionMessageParam[]) => {
   return message.content;
 };
 
+export const reviewFiles = async (
+	traceTag: string,
+	files: PRFile[],
+	model: LLModel,
+	patchBuilder: (file: PRFile) => string,
+	convoBuilder: (diff: string) => ChatMessage[]
+) => {
+	const patches = files.map((file) => patchBuilder(file));
+	const convo = convoBuilder(patches.join("\n"));
+	const feedback = await reviewDiff(traceTag, convo, model);
+	return feedback;
+};
 export const reviewFiles = async (
   files: PRFile[],
   patchBuilder: (file: PRFile) => string,
@@ -46,6 +99,43 @@ export const reviewFiles = async (
 };
 
 const filterFile = (file: PRFile) => {
+	const extensionsToIgnore = new Set<string>([
+		"pdf",
+		"png",
+		"jpg",
+		"jpeg",
+		"gif",
+		"mp4",
+		"mp3",
+		"md",
+		"json",
+		"env",
+		"toml",
+		"svg",
+	]);
+	const filesToIgnore = new Set<string>([
+		"package-lock.json",
+		"yarn.lock",
+		".gitignore",
+		"package.json",
+		"tsconfig.json",
+		"poetry.lock",
+		"readme.md",
+	]);
+	const filename = file.filename.toLowerCase().split("/").pop();
+	if (filename && filesToIgnore.has(filename)) {
+		return false;
+	}
+	const splitFilename = file.filename.toLowerCase().split(".");
+	if (splitFilename.length <= 1) {
+		return false; // return false if there is no extension
+	}
+	const extension = splitFilename.pop()?.toLowerCase();
+	if (extension && extensionsToIgnore.has(extension)) {
+		return false;
+	}
+	return true;
+};
   const extensionsToIgnore = new Set<string>([
     "pdf",
     "png",
@@ -85,8 +175,18 @@ const filterFile = (file: PRFile) => {
 };
 
 const groupFilesByExtension = (files: PRFile[]): Map<string, PRFile[]> => {
+	const filesByExtension: Map<string, PRFile[]> = new Map();
   const filesByExtension: Map<string, PRFile[]> = new Map();
 
+	files.forEach((file) => {
+		const extension = file.filename.split(".").pop()?.toLowerCase();
+		if (extension) {
+			if (!filesByExtension.has(extension)) {
+				filesByExtension.set(extension, []);
+			}
+			filesByExtension.get(extension)?.push(file);
+		}
+	});
   files.forEach((file) => {
     const extension = file.filename.split(".").pop()?.toLowerCase();
     if (extension) {
@@ -456,6 +556,27 @@ export const generateInlineComments = async (
 };
 
 const preprocessFile = async (
+	octokit: Octokit,
+	payload: WebhookEventMap["pull_request"],
+	file: PRFile
+) => {
+	const { base, head } = payload.pull_request;
+	const baseBranch: BranchDetails = {
+		name: base.ref,
+		sha: base.sha,
+		url: payload.pull_request.url,
+	};
+	const currentBranch: BranchDetails = {
+		name: head.ref,
+		sha: head.sha,
+		url: payload.pull_request.url,
+	};
+	// Handle scenario where file does not exist!!
+	const [oldContents, currentContents] = await Promise.all([
+		getGitFile(octokit, payload, baseBranch, file.filename),
+		getGitFile(octokit, payload, currentBranch, file.filename),
+	]);
+const preprocessFile = async (
   octokit: Octokit,
   payload: WebhookEventMap["pull_request"],
   file: PRFile
@@ -477,12 +598,23 @@ const preprocessFile = async (
     getGitFile(octokit, payload, currentBranch, file.filename),
   ]);
 
+	if (oldContents.content != null) {
+		file.old_contents = String.raw`${oldContents.content}`;
+	} else {
+		file.old_contents = null;
+	}
   if (oldContents.content != null) {
     file.old_contents = String.raw`${oldContents.content}`;
   } else {
     file.old_contents = null;
   }
 
+	if (currentContents.content != null) {
+		file.current_contents = String.raw`${currentContents.content}`;
+	} else {
+		file.current_contents = null;
+	}
+};
   if (currentContents.content != null) {
     file.current_contents = String.raw`${currentContents.content}`;
   } else {
@@ -490,6 +622,30 @@ const preprocessFile = async (
   }
 };
 
+const reviewChangesRetry = async (
+	traceTag: string,
+	files: PRFile[],
+	builders: Builders[],
+	model: LLModel = "llama-3.1-8b-instant"
+) => {
+	for (const { convoBuilder, responseBuilder } of builders) {
+		try {
+			console.log(`Trying with convoBuilder: ${convoBuilder.name}.`);
+			return await reviewChanges(
+				traceTag,
+				files,
+				convoBuilder,
+				responseBuilder,
+				model
+			);
+		} catch (error) {
+			console.log(
+				`Error with convoBuilder: ${convoBuilder.name}, trying next one. Error: ${error}`
+			);
+		}
+	}
+	throw new Error("All convoBuilders failed.");
+};
 const reviewChangesRetry = async (files: PRFile[], builders: Builders[]) => {
   for (const { convoBuilder, responseBuilder } of builders) {
     try {
@@ -504,6 +660,93 @@ const reviewChangesRetry = async (files: PRFile[], builders: Builders[]) => {
   throw new Error("All convoBuilders failed.");
 };
 
+export const processPullRequest = async (
+	octokit: Octokit,
+	payload: WebhookEventMap["pull_request"],
+	files: PRFile[],
+	model: LLModel = "llama-3.1-8b-instant",
+	includeSuggestions = false
+) => {
+	const reviewTraceTag = `${payload.pull_request.id}-review`;
+	const inlineTraceTag = `${payload.pull_request.id}-inline`;
+	const filteredFiles = files.filter((file) => filterFile(file));
+	if (filteredFiles.length == 0) {
+		console.log("nothing to comment on");
+		return {
+			review: null,
+			suggestions: [],
+		};
+	}
+	await Promise.all(
+		filteredFiles.map((file) => {
+			return preprocessFile(octokit, payload, file);
+		})
+	);
+	const owner = payload.repository.owner.login;
+	const repoName = payload.repository.name;
+	const curriedXMLResponseBuilder = curriedXmlResponseBuilder(owner, repoName);
+	if (includeSuggestions) {
+		const reviewComments = await reviewChangesRetry(
+			reviewTraceTag,
+			filteredFiles,
+			[
+				{
+					convoBuilder: getXMLReviewPrompt,
+					responseBuilder: curriedXMLResponseBuilder,
+				},
+				{
+					convoBuilder: getReviewPrompt,
+					responseBuilder: basicResponseBuilder,
+				},
+			],
+			model
+		);
+		let inlineComments: CodeSuggestion[] = [];
+		if (reviewComments.structuredComments.length > 0) {
+			console.log("STARTING INLINE COMMENT PROCESSING");
+			inlineComments = await Promise.all(
+				reviewComments.structuredComments.map((suggestion) => {
+					// find relevant file
+					const file = files.find(
+						(file) => file.filename === suggestion.filename
+					);
+					if (file == null) {
+						return null;
+					}
+					return generateInlineComments(
+						inlineTraceTag,
+						suggestion,
+						file,
+						model
+					);
+				})
+			);
+		}
+		const filteredInlineComments = inlineComments.filter(
+			(comment) => comment !== null
+		);
+		return {
+			review: reviewComments,
+			suggestions: filteredInlineComments,
+		};
+	} else {
+		const [review] = await Promise.all([
+			reviewChangesRetry(
+				reviewTraceTag,
+				filteredFiles,
+				[
+					{
+						convoBuilder: getXMLReviewPrompt,
+						responseBuilder: curriedXMLResponseBuilder,
+					},
+					{
+						convoBuilder: getReviewPrompt,
+						responseBuilder: basicResponseBuilder,
+					},
+				],
+				model
+			),
+		]);
 export const processPullRequest = async (
   octokit: Octokit,
   payload: WebhookEventMap["pull_request"],

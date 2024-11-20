@@ -2,16 +2,16 @@ import { encode, encodeChat } from "gpt-tokenizer";
 import type { ChatCompletionMessageParam } from "groq-sdk/resources/chat/completions";
 import type { PRFile } from "./constants";
 import {
-  rawPatchStrategy,
-  smarterContextPatchStrategy,
+	rawPatchStrategy,
+	smarterContextPatchStrategy,
 } from "./context/review";
 import { GROQ_MODEL, type GroqChatModel } from "./llms/groq";
 
 const ModelsToTokenLimits: Record<GroqChatModel, number> = {
-  "mixtral-8x7b-32768": 32768,
-  "gemma-7b-it": 32768,
-  "llama3-70b-8192": 8192,
-  "llama3-8b-8192": 8192,
+	"mixtral-8x7b-32768": 32768,
+	"gemma-7b-it": 32768,
+	"llama3-70b-8192": 8192,
+	"llama3-8b-8192": 8192,
 };
 
 export const REVIEW_DIFF_PROMPT = `You are PR-Reviewer, a language model designed to review git pull requests.
@@ -94,76 +94,76 @@ export const PR_SUGGESTION_TEMPLATE = `{COMMENT}
 `;
 
 const assignLineNumbers = (diff: string) => {
-  const lines = diff.split("\n");
-  let newLine = 0;
-  const lineNumbers = [];
+	const lines = diff.split("\n");
+	let newLine = 0;
+	const lineNumbers = [];
 
-  for (const line of lines) {
-    if (line.startsWith("@@")) {
-      // This is a chunk header. Parse the line numbers.
-      const match = line.match(/@@ -\d+,\d+ \+(\d+),\d+ @@/);
-      newLine = parseInt(match[1]);
-      lineNumbers.push(line); // keep chunk headers as is
-    } else if (!line.startsWith("-")) {
-      // This is a line from the new file.
-      lineNumbers.push(`${newLine++}: ${line}`);
-    }
-  }
+	for (const line of lines) {
+		if (line.startsWith("@@")) {
+			// This is a chunk header. Parse the line numbers.
+			const match = line.match(/@@ -\d+,\d+ \+(\d+),\d+ @@/);
+			newLine = parseInt(match[1]);
+			lineNumbers.push(line); // keep chunk headers as is
+		} else if (!line.startsWith("-")) {
+			// This is a line from the new file.
+			lineNumbers.push(`${newLine++}: ${line}`);
+		}
+	}
 
-  return lineNumbers.join("\n");
+	return lineNumbers.join("\n");
 };
 
 export const buildSuggestionPrompt = (file: PRFile) => {
-  const rawPatch = String.raw`${file.patch}`;
-  const patchWithLines = assignLineNumbers(rawPatch);
-  return `## ${file.filename}\n\n${patchWithLines}`;
+	const rawPatch = String.raw`${file.patch}`;
+	const patchWithLines = assignLineNumbers(rawPatch);
+	return `## ${file.filename}\n\n${patchWithLines}`;
 };
 
 export const buildPatchPrompt = (file: PRFile) => {
-  if (file.old_contents == null) {
-    return rawPatchStrategy(file);
-  } else {
-    return smarterContextPatchStrategy(file);
-  }
+	if (file.old_contents == null) {
+		return rawPatchStrategy(file);
+	} else {
+		return smarterContextPatchStrategy(file);
+	}
 };
 
 export const getReviewPrompt = (diff: string): ChatCompletionMessageParam[] => {
-  return [
-    { role: "system", content: REVIEW_DIFF_PROMPT },
-    { role: "user", content: diff },
-  ];
+	return [
+		{ role: "system", content: REVIEW_DIFF_PROMPT },
+		{ role: "user", content: diff },
+	];
 };
 
 export const getXMLReviewPrompt = (
-  diff: string
+	diff: string
 ): ChatCompletionMessageParam[] => {
-  return [
-    { role: "system", content: XML_PR_REVIEW_PROMPT },
-    { role: "user", content: diff },
-  ];
+	return [
+		{ role: "system", content: XML_PR_REVIEW_PROMPT },
+		{ role: "user", content: diff },
+	];
 };
 
 export const constructPrompt = (
-  files: PRFile[],
-  patchBuilder: (file: PRFile) => string,
-  convoBuilder: (diff: string) => ChatCompletionMessageParam[]
+	files: PRFile[],
+	patchBuilder: (file: PRFile) => string,
+	convoBuilder: (diff: string) => ChatCompletionMessageParam[]
 ) => {
-  const patches = files.map((file) => patchBuilder(file));
-  const diff = patches.join("\n");
-  const convo = convoBuilder(diff);
-  return convo;
+	const patches = files.map((file) => patchBuilder(file));
+	const diff = patches.join("\n");
+	const convo = convoBuilder(diff);
+	return convo;
 };
 
 export const getTokenLength = (blob: string) => {
-  return encode(blob).length;
+	return encode(blob).length;
 };
 
 export const isConversationWithinLimit = (
-  convo: any[],
-  model: GroqChatModel = GROQ_MODEL
+	convo: any[],
+	model: GroqChatModel = GROQ_MODEL
 ) => {
-  // We don't have the encoder for our Groq model, so we're using
-  // the one for gpt-3.5-turbo as a rough equivalent.
-  const convoTokens = encodeChat(convo, "gpt-3.5-turbo").length;
-  return convoTokens < ModelsToTokenLimits[model];
+	// We don't have the encoder for our Groq model, so we're using
+	// the one for gpt-3.5-turbo as a rough equivalent.
+	const convoTokens = encodeChat(convo, "gpt-3.5-turbo").length;
+	return convoTokens < ModelsToTokenLimits[model];
 };
