@@ -7,11 +7,12 @@ import { Review } from "./constants";
 import { env } from "./env";
 import { processPullRequest } from "./review-agent";
 import { applyReview } from "./reviews";
+import * as fs from "fs";
 
 // This creates a new instance of the Octokit App class.
 const reviewApp = new App({
 	appId: env.GITHUB_APP_ID,
-	privateKey: env.GITHUB_PRIVATE_KEY,
+	privateKey: fs.readFileSync(env.GITHUB_PRIVATE_KEY, "utf-8"),
 	webhooks: {
 		secret: env.GITHUB_WEBHOOK_SECRET,
 	},
@@ -33,9 +34,6 @@ const getChangesPerFile = async (payload: WebhookEventMap["pull_request"]) => {
 		console.log("exc");
 		return [];
 	}
-
-	const devEnv = process.env.NODE_ENV != "production";
-	console.log(devEnv);
 };
 
 // This adds an event handler that your code will call later. When this event handler is called, it will log the event to the console. Then, it will use GitHub's REST API to add a comment to the pull request that triggered the event.
@@ -77,7 +75,6 @@ reviewApp.webhooks.on("pull_request.opened", handlePullRequestOpened);
 
 const port = process.env.PORT || 3000;
 const reviewWebhook = `/api/review`;
-const rootPath = `/`;
 
 const reviewMiddleware = createNodeMiddleware(reviewApp.webhooks, {
 	path: "/api/review",
